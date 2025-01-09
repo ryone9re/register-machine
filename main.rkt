@@ -1,7 +1,329 @@
 #lang sicp
 
-(define (tagged-list? list tag) (eq? (car list) tag))
+;; Basic predicates and utilities
+(define (true? x) (not (eq? x false)))
 
+(define (false? x) (eq? x false))
+
+(define (tagged-list? exp tag)
+  (if (pair? exp)
+      (eq? (car exp) tag)
+      false))
+
+;; Environment structure
+(define the-empty-environment '())
+
+(define (enclosing-environment env) (cdr env))
+
+(define (first-frame env) (car env))
+
+(define (make-frame variables values)
+  (cons variables values))
+
+(define (frame-variables frame) (car frame))
+
+(define (frame-values frame) (cdr frame))
+
+(define (add-binding-to-frame! var val frame)
+  (set-car! frame (cons var (frame-variables frame)))
+  (set-cdr! frame (cons val (frame-values frame))))
+
+(define (extend-environment vars vals base-env)
+  (if (= (length vars) (length vals))
+      (cons (make-frame vars vals) base-env)
+      (if (< (length vars) (length vals))
+          (error "Too many arguments supplied" vars vals)
+          (error "Too few arguments supplied" vars vals))))
+
+;; Environment operations
+(define (lookup-variable-value var env)
+  (define (env-loop env)
+    (define (scan vars vals)
+      (cond ((null? vars) (env-loop (enclosing-environment env)))
+            ((eq? var (car vars)) (car vals))
+            (else (scan (cdr vars) (cdr vals)))))
+    (if (eq? env the-empty-environment)
+        (error "Unbound variable" var)
+        (let ((frame (first-frame env)))
+          (scan (frame-variables frame) (frame-values frame)))))
+  (env-loop env))
+
+(define (set-variable-value! var val env)
+  (define (env-loop env)
+    (define (scan vars vals)
+      (cond ((null? vars) (env-loop (enclosing-environment env)))
+            ((eq? var (car vars)) (set-car! vals val))
+            (else (scan (cdr vars) (cdr vals)))))
+    (if (eq? env the-empty-environment)
+        (error "Unbound variable: SET!" var)
+        (let ((frame (first-frame env)))
+          (scan (frame-variables frame) (frame-values frame)))))
+  (env-loop env))
+
+(define (define-variable! var val env)
+  (let ((frame (first-frame env)))
+    (define (scan vars vals)
+      (cond ((null? vars) (add-binding-to-frame! var val frame))
+            ((eq? var (car vars)) (set-car! vals val))
+            (else (scan (cdr vars) (cdr vals)))))
+    (scan (frame-variables frame) (frame-values frame))))
+
+;; Expression type predicates
+(define (self-evaluating? exp)
+  (cond ((number? exp) true)
+        ((string? exp) true)
+        (else false)))
+
+(define (variable? exp) (symbol? exp))
+
+(define (quoted? exp) (tagged-list? exp 'quote))
+
+(define (text-of-quotation exp) (cadr exp))
+
+(define (assignment? exp) (tagged-list? exp 'set!))
+
+(define (assignment-variable exp) (cadr exp))
+
+(define (assignment-value exp) (caddr exp))
+
+(define (definition? exp) (tagged-list? exp 'define))
+
+(define (definition-variable exp)
+  (if (symbol? (cadr exp))
+      (cadr exp)
+      (caadr exp)))
+
+(define (definition-value exp)
+  (if (symbol? (cadr exp))
+      (caddr exp)
+      (make-lambda (cdadr exp)
+                   (cddr exp))))
+
+(define (lambda? exp) (tagged-list? exp 'lambda))
+
+(define (lambda-parameters exp) (cadr exp))
+
+(define (lambda-body exp) (cddr exp))
+
+(define (make-lambda parameters body)
+  (cons 'lambda (cons parameters body)))
+
+(define (let? exp) (tagged-list? exp 'let))
+
+(define (let-bindings exp) (cadr exp))
+
+(define (let-body exp) (cddr exp))
+
+(define (let->combination exp)
+  (let ((parameters (map car (let-bindings exp)))
+        (exps (map cadr (let-bindings exp)))
+        (body (let-body exp)))
+    (cons (make-lambda parameters body) exps)))
+
+(define (if? exp) (tagged-list? exp 'if))
+
+(define (if-predicate exp) (cadr exp))
+
+(define (if-consequent exp) (caddr exp))
+
+(define (if-alternative exp)
+  (if (null? (cdddr exp))
+      'false
+      (cadddr exp)))
+
+(define (make-if predicate consequent alternative)
+  (cons 'if (cons predicate (cons consequent (cons alternative '())))))
+
+(define (begin? exp) (tagged-list? exp 'begin))
+
+(define (begin-actions exp) (cdr exp))
+
+(define (last-exp? seq) (null? (cdr seq)))
+
+(define (first-exp seq) (car seq))
+
+(define (rest-exps seq) (cdr seq))
+
+(define (sequence->exp seq)
+  (cond ((null? seq) seq)
+        ((last-exp? seq) (first-exp seq))
+        (else (make-begin seq))))
+
+(define (make-begin seq) (cons 'begin seq))
+
+(define (cond? exp) (tagged-list? exp 'cond))
+
+(define (cond-clauses exp) (cdr exp))
+
+(define (cond-else-clause? clause)
+  (eq? (cond-predicate clause) 'else))
+
+(define (cond-predicate clause) (car clause))
+
+(define (cond-actions clause) (cdr clause))
+
+(define (cond->if exp) (expand-clauses (cond-clauses exp)))
+
+(define (expand-clauses clauses)
+  (if (null? clauses)
+      'false
+      (let ((first (car clauses))
+            (rest (cdr clauses)))
+        (if (cond-else-clause? first)
+            (if (null? rest)
+                (sequence->exp (cond-actions first))
+                (error "ELSE clause isn't last: COND->IF" clauses))
+            (make-if (cond-predicate first)
+                     (sequence->exp (cond-actions first))
+                     (expand-clauses rest))))))
+
+(define (application? exp) (pair? exp))
+
+(define (operator exp) (car exp))
+
+(define (operands exp) (cdr exp))
+
+(define (no-operands? ops) (null? ops))
+
+(define (first-operand ops) (car ops))
+
+(define (rest-operands ops) (cdr ops))
+
+;; Procedure handling
+(define (make-procedure parameters body env)
+  (cons 'procedure (cons parameters (cons body (cons env '())))))
+
+(define (compound-procedure? p) (tagged-list? p 'procedure))
+
+(define (procedure-parameters p) (cadr p))
+
+(define (procedure-body p) (caddr p))
+
+(define (procedure-environment p) (cadddr p))
+
+;; Evaluator core
+(define (eval exp env)
+  (cond ((self-evaluating? exp) exp)
+        ((variable? exp) (lookup-variable-value exp env))
+        ((quoted? exp) (text-of-quotation exp))
+        ((assignment? exp) (eval-assignment exp env))
+        ((definition? exp) (eval-definition exp env))
+        ((if? exp) (eval-if exp env))
+        ((lambda? exp) (make-procedure (lambda-parameters exp)
+                                       (lambda-body exp)
+                                       env))
+        ((let? exp) (eval (let->combination exp) env))
+        ((begin? exp) (eval-sequence (begin-actions exp) env))
+        ((cond? exp) (eval (cond->if exp) env))
+        ((application? exp) (metacircular-apply (eval (operator exp) env)
+                                   (list-of-values (operands exp) env)))
+        (else (error "Unknown expression type: EVAL" exp))))
+
+(define (metacircular-apply procedure arguments)
+  (cond ((primitive-procedure? procedure)
+         (apply-primitive-procedure procedure arguments))
+        ((compound-procedure? procedure)
+         (eval-sequence
+            (procedure-body procedure)
+            (extend-environment
+               (procedure-parameters procedure)
+               arguments
+               (procedure-environment procedure))))
+        (else (error "Unknown procedure type: METACIRCULAR-APPLY" procedure))))
+
+(define (eval-if exp env)
+  (if (true? (eval (if-predicate exp) env))
+      (eval (if-consequent exp) env)
+      (eval (if-alternative exp) env)))
+
+(define (eval-sequence exps env)
+  (cond ((last-exp? exps)
+         (eval (first-exp exps) env))
+        (else
+         (eval (first-exp exps) env)
+         (eval-sequence (rest-exps exps) env))))
+
+(define (eval-assignment exp env)
+  (set-variable-value! (assignment-variable exp)
+                       (eval (assignment-value exp) env)
+                       env)
+  'ok)
+
+(define (eval-definition exp env)
+  (define-variable! (definition-variable exp)
+                    (eval (definition-value exp) env)
+                    env)
+  'ok)
+
+(define (list-of-values exps env)
+  (if (no-operands? exps)
+      '()
+      (cons (eval (first-operand exps) env)
+            (list-of-values (rest-operands exps) env))))
+
+;; Primitive procedures
+(define primitive-procedures
+  (list (list 'null? null?)
+        (list 'cons cons)
+        (list 'car car)
+        (list 'cdr cdr)
+        (list '+ +)
+        (list '- -)
+        (list '* *)
+        (list '/ /)
+        (list '< <)
+        (list '= =)
+        (list '> >)
+        ))
+
+(define (primitive-procedure-names) (map car primitive-procedures))
+
+(define (primitive-procedure-objects) (map (lambda (proc) (list 'primitive (cadr proc))) primitive-procedures))
+
+(define (primitive-procedure? proc) (tagged-list? proc 'primitive))
+
+(define (primitive-implementation proc) (cadr proc))
+
+(define (apply-primitive-procedure proc args) (apply (primitive-implementation proc) args))
+
+;; Environment setup
+(define (setup-environment)
+  (let ((initial-env (extend-environment
+                      (primitive-procedure-names)
+                      (primitive-procedure-objects)
+                      the-empty-environment)))
+    (define-variable! 'true true initial-env)
+    (define-variable! 'false false initial-env)
+    initial-env))
+
+(define the-global-environment (setup-environment))
+
+;; REPL
+(define input-prompt ";;; M-Eval input:")
+
+(define output-prompt ";;; M-Eval value:")
+
+(define (driver-loop)
+  (prompt-for-input input-prompt)
+  (let ((input (read)))
+    (let ((output (eval input the-global-environment)))
+      (announce-output output-prompt)
+      (user-print output)))
+  (driver-loop))
+
+(define (prompt-for-input string) (newline) (newline) (display string) (newline))
+
+(define (announce-output string) (newline) (display string) (newline))
+
+(define (user-print object)
+  (if (compound-procedure? object)
+      (display (list 'compound-procedure
+                     (procedure-parameters object)
+                     (procedure-body object)
+                     '<procedure-env>))
+      (display object)))
+
+;; Machine
 (define (make-machine register-names ops controller-text)
   (let ((machine (make-new-machine)))
     (for-each
@@ -170,6 +492,7 @@
         (cdr val)
         (error "Undefined label: ASSEMBLE" label-name))))
 
+;; Assemble
 (define (make-execution-procedure inst labels machine pc flag stack ops)
   (cond ((eq? (car inst) 'assign)
          (make-assign inst machine labels ops pc))
@@ -315,3 +638,260 @@
     (if val
         (cadr val)
         (error "Unknown operation ASSEMBLE:" symbol))))
+
+(define (empty-arglist) '())
+
+(define (adjoin-arg arg arglist)
+  (append arglist (list arg)))
+
+(define (last-operand? ops)
+  (null? (cdr ops)))
+
+(define (get-global-environment)
+  the-global-environment)
+
+(define eceval-operations
+ (list
+   (list 'adjoin-arg adjoin-arg) 
+   (list 'announce-output announce-output)
+   (list 'application? application?)
+   (list 'apply-primitive-procedure apply-primitive-procedure)
+   (list 'assignment-value assignment-value)
+   (list 'assignment-variable assignment-variable)
+   (list 'assignment? assignment?)
+   (list 'begin-actions begin-actions)
+   (list 'begin? begin?)
+   (list 'compound-procedure? compound-procedure?)
+   (list 'define-variable! define-variable!)
+   (list 'definition-value definition-value)
+   (list 'definition-variable definition-variable)
+   (list 'definition? definition?)
+   (list 'empty-arglist empty-arglist)
+   (list 'extend-environment extend-environment)
+   (list 'first-exp first-exp)
+   (list 'first-operand first-operand)
+   (list 'get-global-environment get-global-environment)
+   (list 'if-alternative if-alternative)
+   (list 'if-consequent if-consequent)
+   (list 'if-predicate if-predicate)
+   (list 'if? if?)
+   (list 'lambda-body lambda-body)
+   (list 'lambda-parameters lambda-parameters)
+   (list 'lambda? lambda?)
+   (list 'last-exp? last-exp?)
+   (list 'last-operand? last-operand?)
+   (list 'lookup-variable-value lookup-variable-value)
+   (list 'make-procedure make-procedure)
+   (list 'no-operands? no-operands?)
+   (list 'operands operands)
+   (list 'operator operator)
+   (list 'primitive-procedure? primitive-procedure?)
+   (list 'procedure-body procedure-body)
+   (list 'procedure-environment procedure-environment)
+   (list 'procedure-parameters procedure-parameters)
+   (list 'prompt-for-input prompt-for-input)
+   (list 'quoted? quoted?)
+   (list 'read read)
+   (list 'rest-exps rest-exps)
+   (list 'rest-operands rest-operands)
+   (list 'self-evaluating? self-evaluating?)
+   (list 'set-variable-value! set-variable-value!)
+   (list 'text-of-quotation text-of-quotation)
+   (list 'true? true?)
+   (list 'user-print user-print)
+   (list 'variable? variable?)))
+
+(define eceval
+  (make-machine
+     '(exp env val proc argl continue unev)
+     eceval-operations
+     '(read-eval-print-loop
+        eval-dispatch
+          (test (op self-evaluating?) (reg exp))
+          (branch (label ev-self-eval))
+          (test (op variable?) (reg exp))
+          (branch (label ev-variable))
+          (test (op quoted?) (reg exp))
+          (branch (label ev-quoted))
+          (test (op assignment?) (reg exp))
+          (branch (label ev-assignment))
+          (test (op definition?) (reg exp))
+          (branch (label ev-definition))
+          (test (op if?) (reg exp))
+          (branch (label ev-if))
+          (test (op lambda?) (reg exp))
+          (branch (label ev-lambda))
+          (test (op begin?) (reg exp))
+          (branch (label ev-begin))
+          (test (op application?) (reg exp))
+          (branch (label ev-application))
+          (goto (label unknown-expression-type))
+        ev-self-eval
+          (assign val (reg exp))
+          (goto (reg continue))
+        ev-variable
+          (assign val (op lookup-variable-value) (reg exp) (reg env))
+          (goto (reg continue))
+        ev-quoted
+          (assign val (op text-of-quotation) (reg exp))
+          (goto (reg continue))
+        ev-lambda
+          (assign unev (op lambda-parameters) (reg exp))
+          (assign exp (op lambda-body) (reg exp))
+          (assign val (op make-procedure) (reg unev) (reg exp) (reg env))
+          (goto (reg continue))
+        ev-application
+          (save continue)
+          (save env)
+          (assign unev (op operands) (reg exp))
+          (save unev)
+          (assign exp (op operator) (reg exp))
+          (assign continue (label ev-appl-did-operator))
+          (goto (label eval-dispatch))
+        ev-appl-did-operator
+          (restore unev)
+          (restore env)
+          (assign argl (op empty-arglist))
+          (assign proc (reg val))
+          (test (op no-operands?) (reg unev))
+          (branch (label apply-dispatch))
+          (save proc)
+        ev-appl-operand-loop
+          (save argl)
+          (assign exp (op first-operand) (reg unev))
+          (test (op last-operand?) (reg unev))
+          (branch (label ev-appl-last-arg))
+          (save env)
+          (save unev)
+          (assign continue (label ev-appl-accumulate-arg))
+          (goto (label eval-dispatch))
+        ev-appl-accumulate-arg
+          (restore unev)
+          (restore env)
+          (restore argl)
+          (assign argl (op adjoin-arg) (reg val) (reg argl))
+          (assign unev (op rest-operands) (reg unev))
+          (goto (label ev-appl-operand-loop))
+        ev-appl-last-arg
+          (assign continue (label ev-appl-accum-last-arg))
+          (goto (label eval-dispatch))
+        ev-appl-accum-last-arg
+          (restore argl)
+          (assign argl (op adjoin-arg) (reg val) (reg argl))
+          (restore proc)
+          (goto (label apply-dispatch))
+        apply-dispatch
+          (test (op primitive-procedure?) (reg proc))
+          (branch (label primitive-apply))
+          (test (op compound-procedure?) (reg proc))
+          (branch (label compound-apply))
+          (goto (label unknown-procedure-type))
+        primitive-apply
+          (assign val (op apply-primitive-procedure)
+            (reg proc)
+            (reg argl))
+          (restore continue)
+          (goto (reg continue))
+        compound-apply
+          (assign unev (op procedure-parameters) (reg proc))
+          (assign env (op procedure-environment) (reg proc))
+          (assign env (op extend-environment)
+            (reg unev) (reg argl) (reg env))
+          (assign unev (op procedure-body) (reg proc))
+          (goto (label ev-sequence))
+        ev-begin
+          (assign unev (op begin-actions) (reg exp))
+          (save continue)
+          (goto (label ev-sequence))
+        ev-sequence
+          (assign exp (op first-exp) (reg unev))
+          (test (op last-exp?) (reg unev))
+          (branch (label ev-sequence-last-exp))
+          (save unev)
+          (save env)
+          (assign continue (label ev-sequence-continue))
+          (goto (label eval-dispatch))
+        ev-sequence-continue
+          (restore env)
+          (restore unev)
+          (assign unev (op rest-exps) (reg unev))
+          (goto (label ev-sequence))
+        ev-sequence-last-exp
+          (restore continue)
+          (goto (label eval-dispatch))
+        ev-if
+          (save exp)
+          (save env)
+          (save continue)
+          (assign continue (label ev-if-decide))
+          (assign exp (op if-predicate) (reg exp))
+          (goto (label eval-dispatch))
+        ev-if-decide
+          (restore continue)
+          (restore env)
+          (restore exp)
+          (test (op true?) (reg val))
+          (branch (label ev-if-consequent))
+        ev-if-alternative
+          (assign exp (op if-alternative) (reg exp))
+          (goto (label eval-dispatch))
+        ev-if-consequent
+          (assign exp (op if-consequent) (reg exp))
+          (goto (label eval-dispatch))
+        ev-assignment
+          (assign unev (op assignment-variable) (reg exp))
+          (save unev)
+          (assign exp (op assignment-value) (reg exp))
+          (save env)
+          (save continue)
+          (assign continue (label ev-assignment-1))
+          (goto (label eval-dispatch))
+        ev-assignment-1
+          (restore continue)
+          (restore env)
+          (restore unev)
+          (perform
+             (op set-variable-value!) (reg unev) (reg val) (reg env))
+          (assign val (const ok))
+          (goto (reg continue))
+        ev-definition
+          (assign unev (op definition-variable) (reg exp))
+          (save unev)
+          (assign exp (op definition-value) (reg exp))
+          (save env)
+          (save continue)
+          (assign continue (label ev-definition-1))
+          (goto (label eval-dispatch))
+        ev-definition-1
+          (restore continue)
+          (restore env)
+          (restore unev)
+          (perform
+             (op define-variable!) (reg unev) (reg val) (reg env))
+          (assign val (const ok))
+          (goto (reg continue))
+        read-eval-print-loop
+          (perform (op initialize-stack))
+          (perform
+             (op prompt-for-input) (const ";;; EC-Eval input:"))
+          (assign exp (op read))
+          (assign env (op get-global-environment))
+          (assign continue (label print-result))
+          (goto (label eval-dispatch))
+        print-result
+          (perform (op announce-output) (const ";;; EC-Eval value:"))
+          (perform (op user-print) (reg val))
+          (goto (label read-eval-print-loop))
+        unknown-expression-type
+          (assign val (const unknown-expression-type-error))
+          (goto (label signal-error))
+        unknown-procedure-type
+          (restore continue)
+          (assign val (const unknown-procedure-type-error))
+          (goto (label signal-error))
+        signal-error
+          (perform (op user-print) (reg val))
+          (goto (label read-eval-print-loop))
+       )))
+
+(start eceval)
